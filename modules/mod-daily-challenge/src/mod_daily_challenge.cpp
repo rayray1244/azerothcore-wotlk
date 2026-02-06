@@ -20,10 +20,12 @@
 #include "DatabaseEnv.h"
 #include "GameTime.h"
 #include "Player.h"
+#include "Random.h"
 #include "ScriptMgr.h"
 #include "ScriptedGossip.h"
 #include "Spell.h"
 #include "StringFormat.h"
+#include "Unit.h"
 #include "World.h"
 
 using namespace std::chrono_literals;
@@ -34,9 +36,11 @@ namespace
     constexpr uint32 kActionGetChallenge = GOSSIP_ACTION_INFO_DEF + 1;
     constexpr uint32 kActionClaimReward = GOSSIP_ACTION_INFO_DEF + 2;
     constexpr uint32 kActionShowStatus = GOSSIP_ACTION_INFO_DEF + 3;
-    constexpr uint32 kActionClose = GOSSIP_ACTION_INFO_DEF + 4;
+    constexpr uint32 kActionCancelChallenge = GOSSIP_ACTION_INFO_DEF + 4;
+    constexpr uint32 kActionClose = GOSSIP_ACTION_INFO_DEF + 5;
 
     constexpr uint32 kChallengeKillCreatures = 1;
+    constexpr uint32 kChallengeHealPenalty = 2;
 
     struct ChallengeState
     {
@@ -45,6 +49,7 @@ namespace
         uint32 progress = 0;
         bool completed = false;
         bool rewarded = false;
+        bool canceled = false;
     };
 
     bool IsModuleEnabled()
@@ -62,9 +67,29 @@ namespace
         return sConfigMgr->GetOption<uint32>("DailyChallenge.KillTarget", 10);
     }
 
-    int32 GetRewardMoney()
+    int32 GetKillRewardMoney()
     {
         return sConfigMgr->GetOption<int32>("DailyChallenge.RewardMoney", 10000);
+    }
+
+    int32 GetHealPenaltyHonorReward()
+    {
+        return sConfigMgr->GetOption<int32>("DailyChallenge.HealPenaltyRewardHonor", 30000);
+    }
+
+    uint32 GetHealPenaltyPercent()
+    {
+        return sConfigMgr->GetOption<uint32>("DailyChallenge.HealPenaltyPercent", 50);
+    }
+
+    bool IsKillChallengeEnabled()
+    {
+        return sConfigMgr->GetOption<bool>("DailyChallenge.EnableKillChallenge", true);
+    }
+
+    bool IsHealPenaltyChallengeEnabled()
+    {
+        return sConfigMgr->GetOption<bool>("DailyChallenge.EnableHealPenaltyChallenge", true);
     }
 
     uint32 GetCurrentResetStart()
@@ -78,7 +103,7 @@ namespace
     {
         ChallengeState state;
         QueryResult result = CharacterDatabase.Query(
-            "SELECT last_reset, challenge_id, progress, completed, rewarded "
+            "SELECT last_reset, challenge_id, progress, completed, rewarded, canceled "
             "FROM mod_daily_challenge WHERE guid = {}",
             guid);
 
@@ -91,6 +116,7 @@ namespace
         state.progress = fields[2].Get<uint32>();
         state.completed = fields[3].Get<uint8>() != 0;
         state.rewarded = fields[4].Get<uint8>() != 0;
+        state.canceled = fields[5].Get<uint8>() != 0;
         return state;
     }
 
@@ -98,27 +124,44 @@ namespace
     {
         CharacterDatabase.Execute(
             "REPLACE INTO mod_daily_challenge "
-            "(guid, last_reset, challenge_id, progress, completed, rewarded) "
-            "VALUES ({}, {}, {}, {}, {}, {})",
+            "(guid, last_reset, challenge_id, progress, completed, rewarded, canceled) "
+            "VALUES ({}, {}, {}, {}, {}, {}, {})",
             guid,
             state.lastReset,
             state.challengeId,
             state.progress,
             state.completed ? 1 : 0,
-            state.rewarded ? 1 : 0);
+            state.rewarded ? 1 : 0,
+            state.canceled ? 1 : 0);
     }
 
-    bool EnsureCurrentCycle(ObjectGuid::LowType guid, ChallengeState& state)
+    void RewardHealPenaltyChallenge(Player* player)
+    {
+        int32 honorReward = GetHealPenaltyHonorReward();
+        if (honorReward <= 0)
+            return;
+
+        player->ModifyHonorPoints(honorReward);
+        SendPlayerMessage(player, "Daily challenge completed! Honor points have been awarded.");
+    }
+
+    bool EnsureCurrentCycle(Player* player, ObjectGuid::LowType guid, ChallengeState& state)
     {
         uint32 currentReset = GetCurrentResetStart();
         if (state.lastReset == currentReset)
             return false;
+
+        if (player && state.challengeId == kChallengeHealPenalty && !state.canceled && !state.rewarded)
+        {
+            RewardHealPenaltyChallenge(player);
+        }
 
         state.lastReset = currentReset;
         state.challengeId = 0;
         state.progress = 0;
         state.completed = false;
         state.rewarded = false;
+        state.canceled = false;
         SaveState(guid, state);
         return true;
     }
@@ -129,6 +172,13 @@ namespace
         {
             uint32 target = GetKillTargetCount();
             return Acore::StringFormat("Kill {} creatures ({}/{})", target, progress, target);
+        }
+
+        if (challengeId == kChallengeHealPenalty)
+        {
+            uint32 penalty = GetHealPenaltyPercent();
+            int32 honorReward = GetHealPenaltyHonorReward();
+            return Acore::StringFormat("Receive {}% less healing from other players today. Reward: {} honor points after reset.", penalty, honorReward);
         }
 
         return "No challenge assigned";
@@ -143,12 +193,16 @@ namespace
     {
         ObjectGuid::LowType guid = player->GetGUID().GetCounter();
         ChallengeState state = LoadState(guid);
-        EnsureCurrentCycle(guid, state);
+        EnsureCurrentCycle(player, guid, state);
 
         ClearGossipMenuFor(player);
         player->PlayerTalkClass->GetGossipMenu().SetMenuId(kMenuId);
 
-        if (state.challengeId == 0 && !state.completed)
+        if (state.canceled)
+        {
+            AddGossipItemFor(player, GOSSIP_ICON_CHAT, "Daily challenge canceled for today.", GOSSIP_SENDER_MAIN, kActionShowStatus);
+        }
+        else if (state.challengeId == 0 && !state.completed)
         {
             AddGossipItemFor(player, GOSSIP_ICON_CHAT, "Get today’s challenge", GOSSIP_SENDER_MAIN, kActionGetChallenge);
         }
@@ -163,15 +217,36 @@ namespace
             AddGossipItemFor(player, GOSSIP_ICON_MONEY_BAG, "Claim reward", GOSSIP_SENDER_MAIN, kActionClaimReward);
         }
 
+        if (state.challengeId != 0 && !state.rewarded)
+        {
+            AddGossipItemFor(player, GOSSIP_ICON_CHAT, "Cancel today’s challenge", GOSSIP_SENDER_MAIN, kActionCancelChallenge);
+        }
+
         AddGossipItemFor(player, GOSSIP_ICON_CHAT, "Close", GOSSIP_SENDER_MAIN, kActionClose);
         player->PlayerTalkClass->SendGossipMenu(DEFAULT_GOSSIP_MESSAGE, player->GetGUID());
+    }
+
+    std::vector<uint32> GetEnabledChallenges()
+    {
+        std::vector<uint32> challenges;
+        if (IsKillChallengeEnabled())
+            challenges.push_back(kChallengeKillCreatures);
+        if (IsHealPenaltyChallengeEnabled())
+            challenges.push_back(kChallengeHealPenalty);
+        return challenges;
     }
 
     void AssignDailyChallenge(Player* player)
     {
         ObjectGuid::LowType guid = player->GetGUID().GetCounter();
         ChallengeState state = LoadState(guid);
-        EnsureCurrentCycle(guid, state);
+        EnsureCurrentCycle(player, guid, state);
+
+        if (state.canceled)
+        {
+            SendPlayerMessage(player, "You canceled today’s challenge and cannot accept another until the next reset.");
+            return;
+        }
 
         if (state.challengeId != 0 || state.completed)
         {
@@ -179,20 +254,28 @@ namespace
             return;
         }
 
-        state.challengeId = kChallengeKillCreatures;
+        std::vector<uint32> challenges = GetEnabledChallenges();
+        if (challenges.empty())
+        {
+            SendPlayerMessage(player, "No daily challenges are enabled right now.");
+            return;
+        }
+
+        state.challengeId = challenges[urand(0u, challenges.size() - 1)];
         state.progress = 0;
         state.completed = false;
         state.rewarded = false;
+        state.canceled = false;
         SaveState(guid, state);
 
-        SendPlayerMessage(player, "Daily challenge assigned: Kill creatures to complete it.");
+        SendPlayerMessage(player, "Daily challenge assigned.");
     }
 
     void TryClaimReward(Player* player)
     {
         ObjectGuid::LowType guid = player->GetGUID().GetCounter();
         ChallengeState state = LoadState(guid);
-        EnsureCurrentCycle(guid, state);
+        EnsureCurrentCycle(player, guid, state);
 
         if (!state.completed)
         {
@@ -206,9 +289,16 @@ namespace
             return;
         }
 
-        int32 rewardMoney = GetRewardMoney();
-        if (rewardMoney > 0)
-            player->ModifyMoney(rewardMoney);
+        if (state.challengeId == kChallengeKillCreatures)
+        {
+            int32 rewardMoney = GetKillRewardMoney();
+            if (rewardMoney > 0)
+                player->ModifyMoney(rewardMoney);
+        }
+        else if (state.challengeId == kChallengeHealPenalty)
+        {
+            RewardHealPenaltyChallenge(player);
+        }
 
         state.rewarded = true;
         SaveState(guid, state);
@@ -216,14 +306,36 @@ namespace
         SendPlayerMessage(player, "Reward claimed. See you tomorrow!");
     }
 
+    void CancelChallenge(Player* player)
+    {
+        ObjectGuid::LowType guid = player->GetGUID().GetCounter();
+        ChallengeState state = LoadState(guid);
+        EnsureCurrentCycle(player, guid, state);
+
+        if (state.challengeId == 0)
+        {
+            SendPlayerMessage(player, "No active challenge to cancel.");
+            return;
+        }
+
+        state.challengeId = 0;
+        state.progress = 0;
+        state.completed = false;
+        state.rewarded = false;
+        state.canceled = true;
+        SaveState(guid, state);
+
+        SendPlayerMessage(player, "Daily challenge canceled. You will not receive a reward today.");
+    }
+
     void UpdateChallengeProgress(Player* player)
     {
         ObjectGuid::LowType guid = player->GetGUID().GetCounter();
         ChallengeState state = LoadState(guid);
-        if (EnsureCurrentCycle(guid, state))
+        if (EnsureCurrentCycle(player, guid, state))
             return;
 
-        if (state.challengeId != kChallengeKillCreatures || state.completed)
+        if (state.challengeId != kChallengeKillCreatures || state.completed || state.canceled)
             return;
 
         uint32 target = GetKillTargetCount();
@@ -285,11 +397,22 @@ public:
             {
                 ObjectGuid::LowType guid = player->GetGUID().GetCounter();
                 ChallengeState state = LoadState(guid);
-                EnsureCurrentCycle(guid, state);
-                SendPlayerMessage(player, BuildChallengeDescription(state.challengeId, state.progress));
+                EnsureCurrentCycle(player, guid, state);
+                if (state.canceled)
+                {
+                    SendPlayerMessage(player, "Daily challenge canceled for today.");
+                }
+                else
+                {
+                    SendPlayerMessage(player, BuildChallengeDescription(state.challengeId, state.progress));
+                }
                 ShowChallengeMenu(player);
                 break;
             }
+            case kActionCancelChallenge:
+                CancelChallenge(player);
+                ShowChallengeMenu(player);
+                break;
             case kActionClose:
                 CloseGossipMenuFor(player);
                 break;
@@ -307,7 +430,47 @@ public:
     }
 };
 
+class mod_daily_challenge_unit : public UnitScript
+{
+public:
+    mod_daily_challenge_unit()
+        : UnitScript("mod_daily_challenge_unit", true, { UNITHOOK_MODIFY_HEAL_RECEIVED })
+    {
+    }
+
+    void ModifyHealReceived(Unit* target, Unit* healer, uint32& heal, SpellInfo const* /*spellInfo*/) override
+    {
+        if (!IsModuleEnabled())
+            return;
+
+        if (!target || !healer)
+            return;
+
+        Player* targetPlayer = target->ToPlayer();
+        Player* healerPlayer = healer->ToPlayer();
+        if (!targetPlayer || !healerPlayer || targetPlayer == healerPlayer)
+            return;
+
+        ObjectGuid::LowType guid = targetPlayer->GetGUID().GetCounter();
+        ChallengeState state = LoadState(guid);
+        EnsureCurrentCycle(targetPlayer, guid, state);
+
+        if (state.challengeId != kChallengeHealPenalty || state.canceled)
+            return;
+
+        uint32 penalty = GetHealPenaltyPercent();
+        if (penalty >= 100)
+        {
+            heal = 0;
+            return;
+        }
+
+        heal = uint32(float(heal) * (1.0f - (penalty / 100.0f)));
+    }
+};
+
 void Addmod_daily_challengeScripts()
 {
     new mod_daily_challenge_player();
+    new mod_daily_challenge_unit();
 }

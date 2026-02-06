@@ -1,12 +1,13 @@
 # Daily Challenge module
 
-This module adds a simple daily challenge system that players access via a spell-triggered gossip menu.
-Each day, a player can accept a kill challenge, track progress, and claim a reward.
+This module adds a daily challenge system that players access via a spell-triggered gossip menu.
+Each day, a player can accept an enabled challenge, track progress, and claim rewards.
 
 ## Features
 - Spell-based menu to receive and track a daily challenge.
-- Progress tracking on creature kills.
-- Reward claim after completion.
+- Creature-kill challenge with progress tracking and money rewards.
+- Heal-penalty challenge (receive less healing from other players for a day) with honor rewards.
+- Ability to cancel a challenge (no reward if canceled).
 
 ## Installation
 1. Copy the module into your `modules/` folder (already in place if using this repo).
@@ -20,14 +21,22 @@ Each day, a player can accept a kill challenge, track progress, and claim a rewa
 ## Configuration
 ```
 DailyChallenge.Enable = 1
+DailyChallenge.EnableKillChallenge = 1
+DailyChallenge.EnableHealPenaltyChallenge = 1
 DailyChallenge.SpellId = 0
 DailyChallenge.KillTarget = 10
 DailyChallenge.RewardMoney = 10000
+DailyChallenge.HealPenaltyPercent = 50
+DailyChallenge.HealPenaltyRewardHonor = 30000
 ```
 - `DailyChallenge.SpellId`: Spell ID that opens the menu.
 - `DailyChallenge.KillTarget`: Number of creature kills required.
 - `DailyChallenge.RewardMoney`: Reward in copper (10000 = 1 gold).
+- `DailyChallenge.EnableKillChallenge` / `DailyChallenge.EnableHealPenaltyChallenge`: Toggle specific challenges.
+- `DailyChallenge.HealPenaltyPercent`: Healing reduction from other players.
+- `DailyChallenge.HealPenaltyRewardHonor`: Honor points awarded after the daily reset if not canceled.
 
 ## Notes
 - The menu opens only when the configured spell is cast.
 - Rewards can be claimed once per daily reset.
+- If the heal-penalty challenge is active and not canceled, honor is awarded after the daily reset.
