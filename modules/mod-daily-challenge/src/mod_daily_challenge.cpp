@@ -18,6 +18,7 @@
 #include "Chat.h"
 #include "Config.h"
 #include "DatabaseEnv.h"
+#include "Creature.h"
 #include "GameTime.h"
 #include "Player.h"
 #include "Random.h"
@@ -27,6 +28,7 @@
 #include "StringFormat.h"
 #include "Unit.h"
 #include "World.h"
+#include <unordered_map>
 
 using namespace std::chrono_literals;
 
@@ -41,15 +43,22 @@ namespace
 
     constexpr uint32 kChallengeKillCreatures = 1;
     constexpr uint32 kChallengeHealPenalty = 2;
+    constexpr uint32 kChallengeGlassCannon = 3;
+    constexpr uint32 kChallengeUndeadHunter = 4;
+
+    constexpr uint32 kUpdateThrottleSeconds = 10;
 
     struct ChallengeState
     {
         uint32 lastReset = 0;
         uint32 challengeId = 0;
         uint32 progress = 0;
+        uint32 startTime = 0;
+        uint32 expiresAt = 0;
         bool completed = false;
         bool rewarded = false;
         bool canceled = false;
+        bool failed = false;
     };
 
     bool IsModuleEnabled()
@@ -92,6 +101,41 @@ namespace
         return sConfigMgr->GetOption<bool>("DailyChallenge.EnableHealPenaltyChallenge", true);
     }
 
+    bool IsGlassCannonChallengeEnabled()
+    {
+        return sConfigMgr->GetOption<bool>("DailyChallenge.EnableGlassCannonChallenge", true);
+    }
+
+    bool IsUndeadHunterChallengeEnabled()
+    {
+        return sConfigMgr->GetOption<bool>("DailyChallenge.EnableUndeadHunterChallenge", true);
+    }
+
+    uint32 GetGlassCannonDurationSeconds()
+    {
+        return sConfigMgr->GetOption<uint32>("DailyChallenge.GlassCannonDurationHours", 12) * 3600;
+    }
+
+    uint32 GetGlassCannonDamageTakenPercent()
+    {
+        return sConfigMgr->GetOption<uint32>("DailyChallenge.GlassCannonDamageTakenPercent", 20);
+    }
+
+    int32 GetGlassCannonRewardHonor()
+    {
+        return sConfigMgr->GetOption<int32>("DailyChallenge.GlassCannonRewardHonor", 10000);
+    }
+
+    uint32 GetUndeadKillTarget()
+    {
+        return sConfigMgr->GetOption<uint32>("DailyChallenge.UndeadKillTarget", 15);
+    }
+
+    int32 GetUndeadRewardMoney()
+    {
+        return sConfigMgr->GetOption<int32>("DailyChallenge.UndeadRewardMoney", 15000);
+    }
+
     uint32 GetCurrentResetStart()
     {
         auto resetTime = sWorld->GetNextDailyQuestsResetTime();
@@ -103,7 +147,7 @@ namespace
     {
         ChallengeState state;
         QueryResult result = CharacterDatabase.Query(
-            "SELECT last_reset, challenge_id, progress, completed, rewarded, canceled "
+            "SELECT last_reset, challenge_id, progress, start_time, expires_at, completed, rewarded, canceled, failed "
             "FROM mod_daily_challenge WHERE guid = {}",
             guid);
 
@@ -114,9 +158,12 @@ namespace
         state.lastReset = fields[0].Get<uint32>();
         state.challengeId = fields[1].Get<uint32>();
         state.progress = fields[2].Get<uint32>();
-        state.completed = fields[3].Get<uint8>() != 0;
-        state.rewarded = fields[4].Get<uint8>() != 0;
-        state.canceled = fields[5].Get<uint8>() != 0;
+        state.startTime = fields[3].Get<uint32>();
+        state.expiresAt = fields[4].Get<uint32>();
+        state.completed = fields[5].Get<uint8>() != 0;
+        state.rewarded = fields[6].Get<uint8>() != 0;
+        state.canceled = fields[7].Get<uint8>() != 0;
+        state.failed = fields[8].Get<uint8>() != 0;
         return state;
     }
 
@@ -124,15 +171,18 @@ namespace
     {
         CharacterDatabase.Execute(
             "REPLACE INTO mod_daily_challenge "
-            "(guid, last_reset, challenge_id, progress, completed, rewarded, canceled) "
-            "VALUES ({}, {}, {}, {}, {}, {}, {})",
+            "(guid, last_reset, challenge_id, progress, start_time, expires_at, completed, rewarded, canceled, failed) "
+            "VALUES ({}, {}, {}, {}, {}, {}, {}, {}, {}, {})",
             guid,
             state.lastReset,
             state.challengeId,
             state.progress,
+            state.startTime,
+            state.expiresAt,
             state.completed ? 1 : 0,
             state.rewarded ? 1 : 0,
-            state.canceled ? 1 : 0);
+            state.canceled ? 1 : 0,
+            state.failed ? 1 : 0);
     }
 
     void RewardHealPenaltyChallenge(Player* player)
@@ -159,9 +209,12 @@ namespace
         state.lastReset = currentReset;
         state.challengeId = 0;
         state.progress = 0;
+        state.startTime = 0;
+        state.expiresAt = 0;
         state.completed = false;
         state.rewarded = false;
         state.canceled = false;
+        state.failed = false;
         SaveState(guid, state);
         return true;
     }
@@ -179,6 +232,21 @@ namespace
             uint32 penalty = GetHealPenaltyPercent();
             int32 honorReward = GetHealPenaltyHonorReward();
             return Acore::StringFormat("Receive {}% less healing from other players today. Reward: {} honor points after reset.", penalty, honorReward);
+        }
+
+        if (challengeId == kChallengeGlassCannon)
+        {
+            uint32 penalty = GetGlassCannonDamageTakenPercent();
+            uint32 durationHours = GetGlassCannonDurationSeconds() / 3600;
+            int32 honorReward = GetGlassCannonRewardHonor();
+            return Acore::StringFormat("Take {}% more damage from creatures for {} hours without dying. Reward: {} honor points.", penalty, durationHours, honorReward);
+        }
+
+        if (challengeId == kChallengeUndeadHunter)
+        {
+            uint32 target = GetUndeadKillTarget();
+            int32 rewardMoney = GetUndeadRewardMoney();
+            return Acore::StringFormat("Kill {} undead creatures ({}/{}). Reward: {} copper.", target, progress, target, rewardMoney);
         }
 
         return "No challenge assigned";
@@ -233,6 +301,10 @@ namespace
             challenges.push_back(kChallengeKillCreatures);
         if (IsHealPenaltyChallengeEnabled())
             challenges.push_back(kChallengeHealPenalty);
+        if (IsGlassCannonChallengeEnabled())
+            challenges.push_back(kChallengeGlassCannon);
+        if (IsUndeadHunterChallengeEnabled())
+            challenges.push_back(kChallengeUndeadHunter);
         return challenges;
     }
 
@@ -242,9 +314,9 @@ namespace
         ChallengeState state = LoadState(guid);
         EnsureCurrentCycle(player, guid, state);
 
-        if (state.canceled)
+        if (state.canceled || state.failed)
         {
-            SendPlayerMessage(player, "You canceled today’s challenge and cannot accept another until the next reset.");
+            SendPlayerMessage(player, "You already ended today’s challenge and cannot accept another until the next reset.");
             return;
         }
 
@@ -266,9 +338,15 @@ namespace
         state.completed = false;
         state.rewarded = false;
         state.canceled = false;
+        state.failed = false;
+        state.startTime = static_cast<uint32>(GameTime::GetGameTime().count());
+        state.expiresAt = 0;
+        if (state.challengeId == kChallengeGlassCannon)
+            state.expiresAt = state.startTime + GetGlassCannonDurationSeconds();
         SaveState(guid, state);
 
-        SendPlayerMessage(player, "Daily challenge assigned.");
+        SendPlayerMessage(player, "Daily challenge started.");
+        SendPlayerMessage(player, BuildChallengeDescription(state.challengeId, state.progress));
     }
 
     void TryClaimReward(Player* player)
@@ -299,6 +377,18 @@ namespace
         {
             RewardHealPenaltyChallenge(player);
         }
+        else if (state.challengeId == kChallengeGlassCannon)
+        {
+            int32 honorReward = GetGlassCannonRewardHonor();
+            if (honorReward > 0)
+                player->ModifyHonorPoints(honorReward);
+        }
+        else if (state.challengeId == kChallengeUndeadHunter)
+        {
+            int32 rewardMoney = GetUndeadRewardMoney();
+            if (rewardMoney > 0)
+                player->ModifyMoney(rewardMoney);
+        }
 
         state.rewarded = true;
         SaveState(guid, state);
@@ -320,25 +410,43 @@ namespace
 
         state.challengeId = 0;
         state.progress = 0;
+        state.startTime = 0;
+        state.expiresAt = 0;
         state.completed = false;
         state.rewarded = false;
         state.canceled = true;
+        state.failed = false;
         SaveState(guid, state);
 
         SendPlayerMessage(player, "Daily challenge canceled. You will not receive a reward today.");
     }
 
-    void UpdateChallengeProgress(Player* player)
+    void UpdateChallengeProgress(Player* player, Creature* killed)
     {
         ObjectGuid::LowType guid = player->GetGUID().GetCounter();
         ChallengeState state = LoadState(guid);
         if (EnsureCurrentCycle(player, guid, state))
             return;
 
-        if (state.challengeId != kChallengeKillCreatures || state.completed || state.canceled)
+        if (state.completed || state.canceled || state.failed)
             return;
 
-        uint32 target = GetKillTargetCount();
+        uint32 target = 0;
+        if (state.challengeId == kChallengeKillCreatures)
+        {
+            target = GetKillTargetCount();
+        }
+        else if (state.challengeId == kChallengeUndeadHunter)
+        {
+            if (!ShouldCountKillForUndeadChallenge(killed))
+                return;
+            target = GetUndeadKillTarget();
+        }
+        else
+        {
+            return;
+        }
+
         if (state.progress >= target)
             return;
 
@@ -351,6 +459,29 @@ namespace
 
         SaveState(guid, state);
     }
+
+    void UpdateTimedChallenges(Player* player)
+    {
+        ObjectGuid::LowType guid = player->GetGUID().GetCounter();
+        ChallengeState state = LoadState(guid);
+        EnsureCurrentCycle(player, guid, state);
+
+        if (state.challengeId != kChallengeGlassCannon || state.completed || state.canceled || state.failed)
+            return;
+
+        uint32 now = static_cast<uint32>(GameTime::GetGameTime().count());
+        if (state.expiresAt != 0 && now >= state.expiresAt)
+        {
+            state.completed = true;
+            SaveState(guid, state);
+            SendPlayerMessage(player, "Daily challenge completed! Open the menu to claim your reward.");
+        }
+    }
+
+    bool ShouldCountKillForUndeadChallenge(Creature* creature)
+    {
+        return creature && creature->GetCreatureType() == CREATURE_TYPE_UNDEAD;
+    }
 }
 
 class mod_daily_challenge_player : public PlayerScript
@@ -361,7 +492,9 @@ public:
             {
                 PLAYERHOOK_ON_SPELL_CAST,
                 PLAYERHOOK_ON_GOSSIP_SELECT,
-                PLAYERHOOK_ON_CREATURE_KILL
+                PLAYERHOOK_ON_CREATURE_KILL,
+                PLAYERHOOK_ON_PLAYER_JUST_DIED,
+                PLAYERHOOK_ON_UPDATE
             })
     {
     }
@@ -402,6 +535,10 @@ public:
                 {
                     SendPlayerMessage(player, "Daily challenge canceled for today.");
                 }
+                else if (state.failed)
+                {
+                    SendPlayerMessage(player, "Daily challenge failed for today.");
+                }
                 else
                 {
                     SendPlayerMessage(player, BuildChallengeDescription(state.challengeId, state.progress));
@@ -421,12 +558,45 @@ public:
         }
     }
 
-    void OnPlayerCreatureKill(Player* killer, Creature* /*killed*/) override
+    void OnPlayerCreatureKill(Player* killer, Creature* killed) override
     {
         if (!IsModuleEnabled())
             return;
 
-        UpdateChallengeProgress(killer);
+        UpdateChallengeProgress(killer, killed);
+    }
+
+    void OnPlayerJustDied(Player* player) override
+    {
+        if (!IsModuleEnabled())
+            return;
+
+        ObjectGuid::LowType guid = player->GetGUID().GetCounter();
+        ChallengeState state = LoadState(guid);
+        EnsureCurrentCycle(player, guid, state);
+
+        if (state.challengeId != kChallengeGlassCannon || state.completed || state.canceled || state.failed)
+            return;
+
+        state.failed = true;
+        SaveState(guid, state);
+        SendPlayerMessage(player, "Daily challenge failed: you died.");
+    }
+
+    void OnPlayerUpdate(Player* player, uint32 /*p_time*/) override
+    {
+        if (!IsModuleEnabled())
+            return;
+
+        static std::unordered_map<ObjectGuid::LowType, uint32> lastCheck;
+        uint32 now = static_cast<uint32>(GameTime::GetGameTime().count());
+        ObjectGuid::LowType guid = player->GetGUID().GetCounter();
+        auto it = lastCheck.find(guid);
+        if (it != lastCheck.end() && now < it->second + kUpdateThrottleSeconds)
+            return;
+
+        lastCheck[guid] = now;
+        UpdateTimedChallenges(player);
     }
 };
 
@@ -434,7 +604,7 @@ class mod_daily_challenge_unit : public UnitScript
 {
 public:
     mod_daily_challenge_unit()
-        : UnitScript("mod_daily_challenge_unit", true, { UNITHOOK_MODIFY_HEAL_RECEIVED })
+        : UnitScript("mod_daily_challenge_unit", true, { UNITHOOK_MODIFY_HEAL_RECEIVED, UNITHOOK_ON_DAMAGE })
     {
     }
 
@@ -455,7 +625,7 @@ public:
         ChallengeState state = LoadState(guid);
         EnsureCurrentCycle(targetPlayer, guid, state);
 
-        if (state.challengeId != kChallengeHealPenalty || state.canceled)
+        if (state.challengeId != kChallengeHealPenalty || state.canceled || state.failed)
             return;
 
         uint32 penalty = GetHealPenaltyPercent();
@@ -466,6 +636,32 @@ public:
         }
 
         heal = uint32(float(heal) * (1.0f - (penalty / 100.0f)));
+    }
+
+    void OnDamage(Unit* attacker, Unit* victim, uint32& damage) override
+    {
+        if (!IsModuleEnabled())
+            return;
+
+        if (!attacker || !victim || damage == 0)
+            return;
+
+        if (!attacker->ToCreature())
+            return;
+
+        Player* victimPlayer = victim->ToPlayer();
+        if (!victimPlayer)
+            return;
+
+        ObjectGuid::LowType guid = victimPlayer->GetGUID().GetCounter();
+        ChallengeState state = LoadState(guid);
+        EnsureCurrentCycle(victimPlayer, guid, state);
+
+        if (state.challengeId != kChallengeGlassCannon || state.canceled || state.failed)
+            return;
+
+        uint32 bonus = GetGlassCannonDamageTakenPercent();
+        damage = uint32(float(damage) * (1.0f + (bonus / 100.0f)));
     }
 };
 
