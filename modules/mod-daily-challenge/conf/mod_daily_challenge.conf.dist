@@ -1,0 +1,13 @@
+# Daily Challenge module configuration
+# Enable or disable the module.
+DailyChallenge.Enable = 1
+
+# Spell ID that opens the daily challenge menu.
+# Set to a custom spell or an existing ability that should trigger the menu.
+DailyChallenge.SpellId = 0
+
+# Number of creature kills required to complete today's challenge.
+DailyChallenge.KillTarget = 10
+
+# Money reward (in copper) for completing the challenge.
+DailyChallenge.RewardMoney = 10000

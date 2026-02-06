@@ -101,4 +101,7 @@ local.properties
 #
 #  !modules/yourmodule
 #
+!modules/mod-daily-challenge
+!modules/mod-daily-challenge/**
+#
 # ==================
