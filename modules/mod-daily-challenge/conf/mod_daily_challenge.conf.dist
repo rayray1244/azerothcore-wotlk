@@ -1,0 +1,35 @@
+# Daily Challenge module configuration
+# Enable or disable the module.
+DailyChallenge.Enable = 1
+
+# Enable or disable specific challenges.
+DailyChallenge.EnableKillChallenge = 1
+DailyChallenge.EnableHealPenaltyChallenge = 1
+DailyChallenge.EnableGlassCannonChallenge = 1
+DailyChallenge.EnableUndeadHunterChallenge = 1
+
+# Spell ID that opens the daily challenge menu.
+# Set to a custom spell or an existing ability that should trigger the menu.
+DailyChallenge.SpellId = 0
+
+# Number of creature kills required to complete today's challenge.
+DailyChallenge.KillTarget = 10
+
+# Money reward (in copper) for completing the challenge.
+DailyChallenge.RewardMoney = 10000
+
+# Heal-penalty challenge settings.
+# Percent reduction of healing received from other players.
+DailyChallenge.HealPenaltyPercent = 50
+# Honor points granted after surviving the day with the penalty.
+DailyChallenge.HealPenaltyRewardHonor = 30000
+
+# Glass cannon challenge settings.
+# Take extra damage from creatures for the duration without dying.
+DailyChallenge.GlassCannonDurationHours = 12
+DailyChallenge.GlassCannonDamageTakenPercent = 20
+DailyChallenge.GlassCannonRewardHonor = 10000
+
+# Undead hunter challenge settings.
+DailyChallenge.UndeadKillTarget = 15
+DailyChallenge.UndeadRewardMoney = 15000
